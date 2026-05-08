@@ -1,4 +1,4 @@
-name: Scrape Tweets to GitHub Pages
+name: Scrape Tweets and Replies
 
 on:
   schedule:
@@ -22,7 +22,7 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Scrape tweets
+      - name: Scrape tweets and replies
         env:
           TWITTER_AUTH_TOKEN: ${{ secrets.TWITTER_AUTH_TOKEN }}
           TWITTER_CT0: ${{ secrets.TWITTER_CT0 }}
@@ -33,15 +33,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Create or switch to gh-pages branch
-          git fetch origin gh-pages || git checkout --orphan gh-pages
-          git checkout gh-pages || git checkout --orphan gh-pages
+          git fetch origin gh-pages 2>/dev/null || git checkout --orphan gh-pages
+          git checkout gh-pages 2>/dev/null || git checkout --orphan gh-pages
           
-          # Remove everything except our generated files
-          git rm -rf . || true
-          git checkout main -- index.html manifest.json sw.js || true
+          git rm -rf . 2>/dev/null || true
+          git checkout main -- index.html manifest.json sw.js 2>/dev/null || true
           
-          # Commit and push
           git add index.html manifest.json sw.js
-          git commit -m "Update tweets: $(date -u +%Y-%m-%d\ %H:%M\ UTC)" || echo "No changes"
+          git commit -m "Update: $(date -u +%Y-%m-%d\ %H:%M\ UTC)" || echo "No changes"
           git push -f origin gh-pages
