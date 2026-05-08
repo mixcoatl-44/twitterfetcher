@@ -1,17 +1,17 @@
 /**
- * Twitter Scraper with Replies Support
- * Fetches tweets and their replies via Twitter's GraphQL API
+ * Twitter Scraper - Continuous Timeline
+ * Keeps last 4 days of tweets with expanded URLs
  */
 
 const https = require('https');
 const fs = require('fs');
+const path = require('path');
 
 // ════════════════════════════════════════════════════════════════════
 // CONFIGURATION
 // ════════════════════════════════════════════════════════════════════
 
 const CONFIG = {
-  // Accounts to monitor
   ACCOUNTS: [
     'TrueCrypto28',
     'IncomeSharks',
@@ -19,17 +19,13 @@ const CONFIG = {
     'barcauniversal',
   ],
   
-  // How many tweets per account
-  TWEETS_PER_ACCOUNT: 5,
+  TWEETS_PER_ACCOUNT: 11,  // Fetch last 11 tweets per account
+  DAYS_TO_KEEP: 4,         // Show tweets from last 4 days
+  REQUEST_DELAY: 2000,     // Delay between API calls (ms)
   
-  // How many replies to fetch per tweet (set to 0 to disable)
-  REPLIES_PER_TWEET: 0,
-  
-  // Delay between requests (milliseconds)
-  REQUEST_DELAY: 2000,
+  DATABASE_FILE: path.join(__dirname, '../data/tweets.json'),
 };
 
-// Twitter's public GraphQL bearer token
 const TWITTER_BEARER = 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
 
 // ════════════════════════════════════════════════════════════════════
@@ -82,8 +78,67 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
+function loadDatabase() {
+  try {
+    if (fs.existsSync(CONFIG.DATABASE_FILE)) {
+      const data = fs.readFileSync(CONFIG.DATABASE_FILE, 'utf8');
+      return JSON.parse(data);
+    }
+  } catch (error) {
+    console.warn('Failed to load database:', error.message);
+  }
+  return { tweets: [], lastUpdate: null };
+}
+
+function saveDatabase(db) {
+  const dir = path.dirname(CONFIG.DATABASE_FILE);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  
+  db.lastUpdate = new Date().toISOString();
+  fs.writeFileSync(CONFIG.DATABASE_FILE, JSON.stringify(db, null, 2), 'utf8');
+}
+
+function isWithinDays(dateString, days) {
+  const tweetDate = new Date(dateString);
+  const now = new Date();
+  const diffMs = now - tweetDate;
+  const diffDays = diffMs / (1000 * 60 * 60 * 24);
+  return diffDays <= days;
+}
+
 // ════════════════════════════════════════════════════════════════════
-// Twitter API Functions
+// URL Expansion
+// ════════════════════════════════════════════════════════════════════
+
+function expandUrls(text, entities) {
+  if (!entities || !entities.urls || entities.urls.length === 0) {
+    return text;
+  }
+  
+  let expanded = text;
+  
+  // Sort URLs by indices in reverse order to avoid offset issues
+  const sortedUrls = [...entities.urls].sort((a, b) => b.indices[0] - a.indices[0]);
+  
+  for (const urlEntity of sortedUrls) {
+    const shortUrl = urlEntity.url;
+    const expandedUrl = urlEntity.expanded_url || urlEntity.display_url || shortUrl;
+    const displayUrl = urlEntity.display_url || expandedUrl;
+    
+    // Replace t.co URL with clickable link
+    expanded = expanded.replace(
+      shortUrl,
+      `<a href="${expandedUrl}" target="_blank" rel="noopener" class="tweet-link">${displayUrl}</a>`
+    );
+  }
+  
+  return expanded;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Twitter API
 // ════════════════════════════════════════════════════════════════════
 
 async function getUserId(username) {
@@ -144,86 +199,14 @@ async function getUserTweets(userId) {
         favorite_count: legacy.favorite_count || 0,
         reply_count: legacy.reply_count || 0,
         is_retweet: !!legacy.retweeted_status_result,
+        entities: legacy.entities,  // Contains URL expansion data
       };
     })
     .filter(Boolean);
 }
 
-async function getTweetReplies(tweetId) {
-  if (CONFIG.REPLIES_PER_TWEET === 0) return [];
-  
-  const variables = {
-    focalTweetId: tweetId,
-    with_rux_injections: false,
-    includePromotedContent: false,
-    withCommunity: false,
-    withQuickPromoteEligibilityTweetFields: false,
-    withBirdwatchNotes: false,
-    withVoice: false,
-  };
-  
-  const features = {
-    rweb_lists_timeline_redesign_enabled: true,
-    responsive_web_graphql_exclude_directive_enabled: true,
-    verified_phone_label_enabled: false,
-    responsive_web_graphql_timeline_navigation_enabled: true,
-    view_counts_everywhere_api_enabled: true,
-    longform_notetweets_consumption_enabled: true,
-    responsive_web_twitter_article_tweet_consumption_enabled: false,
-    tweet_awards_web_tipping_enabled: false,
-    responsive_web_enhance_cards_enabled: false
-  };
-  
-  const url = `https://twitter.com/i/api/graphql/ItejhtNxjGIbATQVaHnq7g/TweetDetail` +
-    `?variables=${encodeURIComponent(JSON.stringify(variables))}` +
-    `&features=${encodeURIComponent(JSON.stringify(features))}`;
-  
-  try {
-    const data = await httpsRequest(url, buildHeaders());
-    
-    const instructions = data.data?.threaded_conversation_with_injections_v2?.instructions || [];
-    const entries = instructions.find(i => i.type === 'TimelineAddEntries')?.entries || [];
-    
-    const replies = [];
-    
-    for (const entry of entries) {
-      // Skip the original tweet and conversational context
-      if (!entry.entryId?.startsWith('conversationthread-')) continue;
-      
-      const items = entry.content?.items || [];
-      for (const item of items) {
-        const result = item.item?.itemContent?.tweet_results?.result;
-        const legacy = result?.legacy || result?.tweet?.legacy;
-        const user = result?.core?.user_results?.result?.legacy;
-        
-        if (!legacy || !user) continue;
-        
-        // Skip if this is the original tweet
-        if (legacy.id_str === tweetId) continue;
-        
-        replies.push({
-          id: legacy.id_str,
-          text: legacy.full_text,
-          author: user.screen_name,
-          author_name: user.name,
-          created_at: legacy.created_at,
-          favorite_count: legacy.favorite_count || 0,
-        });
-        
-        if (replies.length >= CONFIG.REPLIES_PER_TWEET) break;
-      }
-      if (replies.length >= CONFIG.REPLIES_PER_TWEET) break;
-    }
-    
-    return replies;
-  } catch (error) {
-    console.error(`  Failed to fetch replies: ${error.message}`);
-    return [];
-  }
-}
-
 async function fetchAllTweets() {
-  const results = [];
+  const newTweets = [];
   
   for (const username of CONFIG.ACCOUNTS) {
     console.log(`\nFetching @${username}...`);
@@ -235,36 +218,61 @@ async function fetchAllTweets() {
       
       const tweets = await getUserTweets(userId);
       console.log(`  Found ${tweets.length} tweets`);
-      await sleep(CONFIG.REQUEST_DELAY);
       
-      // Fetch replies for each tweet
       for (const tweet of tweets) {
-        if (CONFIG.REPLIES_PER_TWEET > 0) {
-          console.log(`  Fetching replies for tweet ${tweet.id}...`);
-          tweet.replies = await getTweetReplies(tweet.id);
-          console.log(`    Found ${tweet.replies.length} replies`);
-          await sleep(CONFIG.REQUEST_DELAY);
-        } else {
-          tweet.replies = [];
-        }
+        newTweets.push({ ...tweet, username });
       }
       
-      results.push({ username, tweets });
+      await sleep(CONFIG.REQUEST_DELAY);
       
     } catch (error) {
       console.error(`  ❌ Error: ${error.message}`);
-      results.push({ username, tweets: [], error: error.message });
     }
   }
   
-  return results;
+  return newTweets;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Database Management
+// ════════════════════════════════════════════════════════════════════
+
+function mergeTweets(existingDb, newTweets) {
+  const tweetMap = new Map();
+  
+  // Add existing tweets
+  for (const tweet of existingDb.tweets) {
+    tweetMap.set(tweet.id, tweet);
+  }
+  
+  // Add/update new tweets
+  for (const tweet of newTweets) {
+    tweetMap.set(tweet.id, tweet);
+  }
+  
+  // Convert back to array
+  const allTweets = Array.from(tweetMap.values());
+  
+  // Filter to last N days
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - CONFIG.DAYS_TO_KEEP);
+  
+  const recentTweets = allTweets.filter(tweet => {
+    return isWithinDays(tweet.created_at, CONFIG.DAYS_TO_KEEP);
+  });
+  
+  console.log(`\nTotal unique tweets: ${allTweets.length}`);
+  console.log(`Tweets in last ${CONFIG.DAYS_TO_KEEP} days: ${recentTweets.length}`);
+  console.log(`Removed ${allTweets.length - recentTweets.length} old tweets`);
+  
+  return recentTweets;
 }
 
 // ════════════════════════════════════════════════════════════════════
 // HTML Generation
 // ════════════════════════════════════════════════════════════════════
 
-function generateHTML(accountData) {
+function generateHTML(tweets) {
   const now = new Date();
   const lastUpdate = now.toLocaleString('en-GB', {
     day: '2-digit',
@@ -275,18 +283,10 @@ function generateHTML(accountData) {
     timeZone: 'UTC'
   }) + ' UTC';
   
-  // Flatten all tweets
-  const allTweets = [];
-  accountData.forEach(({ username, tweets }) => {
-    tweets.forEach(tweet => {
-      allTweets.push({ ...tweet, username });
-    });
-  });
+  // Sort newest first
+  tweets.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   
-  // Sort: newest first (Twitter style)
-  allTweets.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-  
-  const tweetHTML = allTweets.map(tweet => {
+  const tweetHTML = tweets.map(tweet => {
     const date = new Date(tweet.created_at);
     const formatted = date.toLocaleString('en-GB', {
       day: '2-digit',
@@ -299,58 +299,24 @@ function generateHTML(accountData) {
     const icon = tweet.is_retweet ? '🔁' : '';
     const tweetUrl = `https://twitter.com/${tweet.username}/status/${tweet.id}`;
     
-    // Generate replies HTML
-    let repliesHTML = '';
-    if (tweet.replies && tweet.replies.length > 0) {
-      const repliesContent = tweet.replies.map(reply => {
-        const replyDate = new Date(reply.created_at);
-        const replyFormatted = replyDate.toLocaleString('en-GB', {
-          day: '2-digit',
-          month: 'short',
-          hour: '2-digit',
-          minute: '2-digit',
-          timeZone: 'UTC'
-        }) + ' UTC';
-        
-        return `
-        <div class="reply">
-          <div class="reply-header">
-            <span class="reply-author">@${escapeHtml(reply.author)}</span>
-            <span class="reply-date">${replyFormatted}</span>
-          </div>
-          <div class="reply-text">${escapeHtml(reply.text)}</div>
-          ${reply.favorite_count > 0 ? `<div class="reply-stats">❤️ ${reply.favorite_count}</div>` : ''}
-        </div>`;
-      }).join('');
-      
-      repliesHTML = `
-      <div class="replies-section">
-        <button class="replies-toggle" onclick="toggleReplies(this)">
-          <span class="toggle-icon">▶</span>
-          Show ${tweet.replies.length} ${tweet.replies.length === 1 ? 'reply' : 'replies'}
-        </button>
-        <div class="replies-container hidden">
-          ${repliesContent}
-        </div>
-      </div>`;
-    }
+    // Expand t.co URLs in tweet text
+    const expandedText = expandUrls(tweet.text, tweet.entities);
     
     return `
     <div class="tweet" data-tweet-id="${tweet.id}">
       <div class="tweet-header">
         <div class="tweet-author">
           ${icon ? `<span class="retweet-icon">${icon}</span>` : ''}
-          <span class="username">@${tweet.username}</span>
+          <span class="username">@${escapeHtml(tweet.username)}</span>
         </div>
         <div class="tweet-date">${formatted}</div>
       </div>
-      <div class="tweet-text">${escapeHtml(tweet.text)}</div>
+      <div class="tweet-text">${expandedText}</div>
       <div class="tweet-stats">
-        ${tweet.reply_count > 0 ? `<span>💬 ${tweet.reply_count}</span>` : ''}
-        ${tweet.retweet_count > 0 ? `<span>🔁 ${tweet.retweet_count}</span>` : ''}
-        ${tweet.favorite_count > 0 ? `<span>❤️ ${tweet.favorite_count}</span>` : ''}
+        ${tweet.reply_count > 0 ? `<span>💬 ${formatNumber(tweet.reply_count)}</span>` : ''}
+        ${tweet.retweet_count > 0 ? `<span>🔁 ${formatNumber(tweet.retweet_count)}</span>` : ''}
+        ${tweet.favorite_count > 0 ? `<span>❤️ ${formatNumber(tweet.favorite_count)}</span>` : ''}
       </div>
-      ${repliesHTML}
       <a href="${tweetUrl}" class="view-link" target="_blank" rel="noopener">View on Twitter →</a>
     </div>`;
   }).join('');
@@ -360,7 +326,7 @@ function generateHTML(accountData) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <meta name="description" content="Lightweight Twitter feed with replies">
+  <meta name="description" content="Lightweight Twitter timeline - last ${CONFIG.DAYS_TO_KEEP} days">
   <meta name="theme-color" content="#15202b">
   <title>Twitter Feed</title>
   <link rel="manifest" href="manifest.json">
@@ -479,6 +445,16 @@ function generateHTML(accountData) {
       white-space: pre-wrap;
     }
     
+    .tweet-link {
+      color: var(--text-link);
+      text-decoration: none;
+      word-break: break-all;
+    }
+    
+    .tweet-link:hover {
+      text-decoration: underline;
+    }
+    
     .tweet-stats {
       display: flex;
       gap: 16px;
@@ -491,87 +467,6 @@ function generateHTML(accountData) {
       display: flex;
       align-items: center;
       gap: 4px;
-    }
-    
-    .replies-section {
-      margin-top: 12px;
-      padding-top: 12px;
-      border-top: 1px solid var(--border-color);
-    }
-    
-    .replies-toggle {
-      background: none;
-      border: none;
-      color: var(--text-link);
-      font-size: 13px;
-      font-weight: 700;
-      cursor: pointer;
-      padding: 8px 0;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      transition: color 0.2s;
-    }
-    
-    .replies-toggle:hover {
-      color: #1a8cd8;
-    }
-    
-    .toggle-icon {
-      transition: transform 0.2s;
-      font-size: 10px;
-    }
-    
-    .replies-toggle.expanded .toggle-icon {
-      transform: rotate(90deg);
-    }
-    
-    .replies-container {
-      margin-top: 8px;
-      padding-left: 12px;
-      border-left: 2px solid var(--border-color);
-    }
-    
-    .replies-container.hidden {
-      display: none;
-    }
-    
-    .reply {
-      padding: 8px 0;
-      border-bottom: 1px solid var(--bg-hover);
-    }
-    
-    .reply:last-child {
-      border-bottom: none;
-    }
-    
-    .reply-header {
-      display: flex;
-      justify-content: space-between;
-      margin-bottom: 4px;
-    }
-    
-    .reply-author {
-      color: var(--text-primary);
-      font-weight: 600;
-      font-size: 14px;
-    }
-    
-    .reply-date {
-      color: var(--text-secondary);
-      font-size: 12px;
-    }
-    
-    .reply-text {
-      font-size: 14px;
-      line-height: 18px;
-      color: var(--text-primary);
-      margin-bottom: 4px;
-    }
-    
-    .reply-stats {
-      font-size: 12px;
-      color: var(--text-secondary);
     }
     
     .view-link {
@@ -658,7 +553,7 @@ function generateHTML(accountData) {
   <div class="container">
     <header>
       <h1>Home</h1>
-      <div class="subtitle">Updated ${lastUpdate}</div>
+      <div class="subtitle">Last ${CONFIG.DAYS_TO_KEEP} days • Updated ${lastUpdate}</div>
     </header>
     
     <main class="timeline">
@@ -667,7 +562,8 @@ function generateHTML(accountData) {
     
     <footer>
       Auto-updates every 30 minutes<br>
-      Monitoring: ${CONFIG.ACCOUNTS.map(u => '@' + u).join(', ')}
+      Monitoring: ${CONFIG.ACCOUNTS.map(u => '@' + u).join(', ')}<br>
+      Showing ${tweets.length} tweets from last ${CONFIG.DAYS_TO_KEEP} days
     </footer>
   </div>
   
@@ -676,37 +572,18 @@ function generateHTML(accountData) {
   </button>
   
   <script>
-    // Register service worker
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('sw.js').catch(() => {});
     }
     
-    // Toggle replies visibility
-    function toggleReplies(button) {
-      button.classList.toggle('expanded');
-      const container = button.nextElementSibling;
-      container.classList.toggle('hidden');
-      
-      if (container.classList.contains('hidden')) {
-        button.innerHTML = '<span class="toggle-icon">▶</span> Show ' + 
-          container.querySelectorAll('.reply').length + ' ' +
-          (container.querySelectorAll('.reply').length === 1 ? 'reply' : 'replies');
-      } else {
-        button.innerHTML = '<span class="toggle-icon">▶</span> Hide replies';
-      }
-    }
-    
-    // Refresh page with animation
     function refreshPage() {
       const btn = document.querySelector('.refresh-btn');
       btn.classList.add('spinning');
       location.reload();
     }
     
-    // Auto-refresh every 30 minutes
     setTimeout(() => location.reload(), 30 * 60 * 1000);
     
-    // Scroll restoration
     if ('scrollRestoration' in history) {
       history.scrollRestoration = 'manual';
     }
@@ -725,30 +602,44 @@ function escapeHtml(text) {
     .replace(/'/g, '&#039;');
 }
 
+function formatNumber(num) {
+  if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+  if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+  return num.toString();
+}
+
 // ════════════════════════════════════════════════════════════════════
 // Main
 // ════════════════════════════════════════════════════════════════════
 
 async function main() {
   console.log('═'.repeat(60));
-  console.log('Twitter Scraper with Replies');
+  console.log('Twitter Scraper - Continuous Timeline');
   console.log(`Time: ${new Date().toISOString()}`);
   console.log(`Accounts: ${CONFIG.ACCOUNTS.join(', ')}`);
-  console.log(`Replies per tweet: ${CONFIG.REPLIES_PER_TWEET}`);
+  console.log(`Fetching last ${CONFIG.TWEETS_PER_ACCOUNT} tweets per account`);
+  console.log(`Keeping tweets from last ${CONFIG.DAYS_TO_KEEP} days`);
   console.log('═'.repeat(60));
   
-  const accountData = await fetchAllTweets();
+  // Load existing database
+  const db = loadDatabase();
+  console.log(`\nLoaded ${db.tweets.length} tweets from database`);
   
-  const html = generateHTML(accountData);
+  // Fetch new tweets
+  const newTweets = await fetchAllTweets();
+  console.log(`\nFetched ${newTweets.length} new tweets`);
+  
+  // Merge and filter
+  const mergedTweets = mergeTweets(db, newTweets);
+  
+  // Save updated database
+  saveDatabase({ tweets: mergedTweets });
+  console.log(`\nSaved ${mergedTweets.length} tweets to database`);
+  
+  // Generate HTML
+  const html = generateHTML(mergedTweets);
   fs.writeFileSync('index.html', html, 'utf8');
-  console.log('\n✅ Generated index.html');
-  
-  const totalTweets = accountData.reduce((sum, a) => sum + a.tweets.length, 0);
-  const totalReplies = accountData.reduce((sum, a) => 
-    sum + a.tweets.reduce((s, t) => s + (t.replies?.length || 0), 0), 0);
-  
-  console.log(`📊 Total tweets: ${totalTweets}`);
-  console.log(`💬 Total replies: ${totalReplies}`);
+  console.log('✅ Generated index.html');
   
   console.log('\n' + '═'.repeat(60));
   console.log('Complete');
@@ -757,5 +648,6 @@ async function main() {
 
 main().catch(error => {
   console.error('\n❌ Fatal error:', error.message);
+  console.error(error.stack);
   process.exit(1);
 });
