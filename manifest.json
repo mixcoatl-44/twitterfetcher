@@ -1,7 +1,7 @@
 {
   "name": "Twitter Feed",
   "short_name": "Twitter",
-  "description": "Lightweight Twitter timeline with replies",
+  "description": "Lightweight Twitter timeline - last 4 days",
   "start_url": "/TwitterFetcher/",
   "display": "standalone",
   "background_color": "#15202b",
