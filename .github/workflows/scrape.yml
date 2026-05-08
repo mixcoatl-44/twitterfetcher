@@ -28,6 +28,15 @@ jobs:
           TWITTER_CT0: ${{ secrets.TWITTER_CT0 }}
         run: node scripts/scrape-tweets.js
 
+      - name: Commit updated database
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/tweets.json
+          git commit -m "Update tweets database [skip ci]" || echo "No changes to database"
+          git pull --rebase
+          git push
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
