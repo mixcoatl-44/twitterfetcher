@@ -1,9 +1,5 @@
-/**
- * Service Worker - Offline Support
- */
-
-const CACHE_NAME = 'twitter-feed-v2';
-const BASE_PATH = '/TwitterFetcher';  // 🔧 CHANGE THIS to /YOUR-REPO-NAME
+const CACHE_NAME = 'twitter-feed-v3';
+const BASE_PATH = '/TwitterFetcher';  // 🔧 CHANGE to /YOUR-REPO-NAME
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
