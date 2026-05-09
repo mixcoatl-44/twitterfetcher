@@ -9,52 +9,45 @@ AUTH_TOKEN = os.environ.get("TWITTER_AUTH_TOKEN", "")
 async def main():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = await context.new_page()
 
         # Set authentication cookies if provided
         if CT0 and AUTH_TOKEN:
             await context.add_cookies([
-                {
-                    "name": "ct0",
-                    "value": CT0,
-                    "domain": ".x.com",
-                    "path": "/",
-                },
-                {
-                    "name": "auth_token",
-                    "value": AUTH_TOKEN,
-                    "domain": ".x.com",
-                    "path": "/",
-                },
+                {"name": "ct0", "value": CT0, "domain": ".x.com", "path": "/"},
+                {"name": "auth_token", "value": AUTH_TOKEN, "domain": ".x.com", "path": "/"},
             ])
             print("✅ Twitter cookies set")
 
-        page = await context.new_page()
         print(f"🔗 Navigating to {TWEET_URL}")
-        await page.goto(TWEET_URL, wait_until="networkidle", timeout=60000)
+        # Use domcontentloaded to avoid the never‑ending networkidle
+        await page.goto(TWEET_URL, wait_until="domcontentloaded", timeout=30000)
 
-        # Wait for the tweet to appear
+        # Try to wait for the tweet container (with a longer timeout)
         try:
-            await page.wait_for_selector('[data-testid="tweet"]', timeout=15000)
+            await page.wait_for_selector('[data-testid="tweet"]', timeout=20000)
         except Exception as e:
             print(f"⚠️  Tweet element not found: {e}")
-            # Save page HTML for debugging
+            # Save screenshot and HTML for debugging
+            await page.screenshot(path="debug.png", full_page=True)
             with open("tweet.html", "w", encoding="utf-8") as f:
                 f.write(await page.content())
+            print("📸 Screenshot and HTML saved for debugging")
             await browser.close()
             return
 
-        # Extract the first tweet element
+        # Extract the first tweet element's outer HTML
         tweet = await page.query_selector('[data-testid="tweet"]')
-        html = await tweet.inner_html() if tweet else ""
         outer = await tweet.evaluate("el => el.outerHTML") if tweet else ""
 
-        # Save full tweet HTML
         with open("tweet.html", "w", encoding="utf-8") as f:
             f.write(outer)
         print("📄 Saved tweet HTML to tweet.html")
 
-        # Extract all links (anchors) inside the tweet
+        # Extract all links
         links = await page.eval_on_selector(
             '[data-testid="tweet"]',
             """(el) => {
@@ -65,7 +58,6 @@ async def main():
                 }));
             }"""
         )
-
         with open("links.txt", "w", encoding="utf-8") as f:
             for i, link in enumerate(links, 1):
                 f.write(f"{i}. {link['href']}\n   Text: {link['text']}\n\n")
