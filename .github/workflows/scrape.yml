@@ -28,11 +28,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: node scripts/scrape-tweets.js
 
-      - name: Update last seen state
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/state.json
-          git commit -m "Update state [skip ci]" || echo "No changes"
-          git pull --rebase
-          git push
+      - name: Commit updated state
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update last seen tweet IDs [skip ci]"
+          file_pattern: "data/state.json"
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
