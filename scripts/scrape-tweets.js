@@ -208,6 +208,23 @@ function getMediaUrls(entities) {
 }
 
 // ════════════════════════════════════════════════════════════════════
+// Full text extraction (handles long tweets)
+// ════════════════════════════════════════════════════════════════════
+
+/**
+ * Returns the complete tweet text, preferring the long-form note_tweet
+ * when available, otherwise falling back to the legacy truncated text.
+ */
+function getFullText(legacy, result) {
+  // For long tweets, Twitter puts the full text inside note_tweet
+  const noteText = result?.note_tweet?.note_tweet_results?.result?.text;
+  if (noteText) return noteText;
+
+  // Fallback to legacy full_text (truncated for >280 chars)
+  return legacy.full_text || '';
+}
+
+// ════════════════════════════════════════════════════════════════════
 // Twitter API
 // ════════════════════════════════════════════════════════════════════
 
@@ -237,7 +254,7 @@ async function getUserTweets(userId, sinceId = null) {
     variables.since_id = sinceId;
   }
   
-  // ✅ FIX: Added extended tweet features to prevent truncation
+  // Extended tweet features to prevent truncation
   const features = {
     rweb_lists_timeline_redesign_enabled: true,
     responsive_web_graphql_exclude_directive_enabled: true,
@@ -275,15 +292,20 @@ async function getUserTweets(userId, sinceId = null) {
       
       if (!legacy) return null;
       
+      // Use the full text (handles long tweets)
+      const fullText = getFullText(legacy, result);
+      
       // Check for quoted tweet
       let quotedTweet = null;
       if (legacy.quoted_status_result) {
         const quotedLegacy = legacy.quoted_status_result.result?.legacy;
         const quotedUser = legacy.quoted_status_result.result?.core?.user_results?.result?.legacy;
+        const quotedResult = legacy.quoted_status_result.result;   // for note_tweet
+        const quotedFullText = getFullText(quotedLegacy || {}, quotedResult);
         
         if (quotedLegacy && quotedUser) {
           quotedTweet = {
-            text: quotedLegacy.full_text,
+            text: quotedFullText,
             author: quotedUser.screen_name,
             author_name: quotedUser.name,
             entities: quotedLegacy.entities,
@@ -292,8 +314,8 @@ async function getUserTweets(userId, sinceId = null) {
       }
       
       return {
-        id: legacy.id_str,
-        text: legacy.full_text,
+        id: result.rest_id,                  // use the official rest_id
+        text: fullText,
         created_at: legacy.created_at,
         retweet_count: legacy.retweet_count || 0,
         favorite_count: legacy.favorite_count || 0,
@@ -324,8 +346,7 @@ async function fetchAllTweets(state) {
       console.log(`  Found ${tweets.length} new tweet(s)`);
       
       if (tweets.length > 0) {
-        // ✅ CRITICAL FIX: Twitter returns tweets NEWEST FIRST
-        // So tweets[0] is the NEWEST tweet, which is what we want to save
+        // Twitter returns tweets NEWEST FIRST → tweets[0] = newest
         state[username] = tweets[0].id;
         console.log(`  Updated last seen ID to: ${state[username]}`);
         
@@ -362,7 +383,7 @@ function formatTweetMessage(tweet) {
   const icon = tweet.is_retweet ? '🔁 ' : '';
   const tweetUrl = `https://twitter.com/${tweet.username}/status/${tweet.id}`;
   
-  // Expand URLs in main tweet text
+  // Expand URLs in main tweet text (now uses full text)
   let text = expandUrls(tweet.text, tweet.entities);
   
   // Get media URLs
@@ -382,7 +403,7 @@ function formatTweetMessage(tweet) {
     }
   }
   
-  // Add quoted tweet if exists
+  // Add quoted tweet if exists (with full text)
   if (tweet.quoted_tweet) {
     const quotedText = expandUrls(tweet.quoted_tweet.text, tweet.quoted_tweet.entities);
     message += `\n┌─ Quoted tweet ─────────\n`;
@@ -475,7 +496,7 @@ async function main() {
     return;
   }
   
-  // Sort chronologically (oldest first) using timestamp parsing
+  // Sort chronologically (oldest first)
   newTweets.sort((a, b) => {
     const dateA = Date.parse(a.created_at);
     const dateB = Date.parse(b.created_at);
