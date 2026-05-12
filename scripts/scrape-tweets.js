@@ -300,7 +300,7 @@ async function getUserTweets(userId, sinceId = null) {
       if (legacy.quoted_status_result) {
         const quotedLegacy = legacy.quoted_status_result.result?.legacy;
         const quotedUser = legacy.quoted_status_result.result?.core?.user_results?.result?.legacy;
-        const quotedResult = legacy.quoted_status_result.result;   // for note_tweet
+        const quotedResult = legacy.quoted_status_result.result;
         const quotedFullText = getFullText(quotedLegacy || {}, quotedResult);
         
         if (quotedLegacy && quotedUser) {
@@ -314,7 +314,8 @@ async function getUserTweets(userId, sinceId = null) {
       }
       
       return {
-        id: result.rest_id,                  // use the official rest_id
+        // IMPORTANT: use legacy.id_str, not result.rest_id, for reliable ID
+        id: legacy.id_str,
         text: fullText,
         created_at: legacy.created_at,
         retweet_count: legacy.retweet_count || 0,
