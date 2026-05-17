@@ -17,7 +17,11 @@ const CONFIG = {
     'TruthTrumpPosts',
     'spectatorindex',
     'RafaelH117',
-    'barcauniversal',
+    'netblocks',
+    'FabrizioRomano',
+    'TrueCrypto',
+    'sdfprop',
+    'nebraskangooner',
   ],
   
   TWEETS_PER_ACCOUNT: 44,
