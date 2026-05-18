@@ -132,10 +132,9 @@ function loadState() {
     console.warn('Failed to load state:', error.message);
   }
   
-  // Initialize state with null for each account
   const state = { lastUpdate: null };
   CONFIG.ACCOUNTS.forEach(acc => {
-    state[acc] = null; // Last seen tweet ID
+    state[acc] = null;
   });
   return state;
 }
@@ -160,41 +159,34 @@ function expandUrls(text, entities) {
   let expanded = text;
   const replacements = [];
   
-  // Handle regular URLs
   if (entities.urls) {
     for (const urlEntity of entities.urls) {
       const shortUrl = urlEntity.url;
       const expandedUrl = urlEntity.expanded_url || urlEntity.display_url || shortUrl;
       
-      // Check if it's a media URL (these should be removed from text)
       if (expandedUrl.includes('twitter.com') && expandedUrl.includes('/photo/')) {
         replacements.push({ from: shortUrl, to: '' });
       } else {
-        // Regular link - make it clickable
         replacements.push({ from: shortUrl, to: expandedUrl });
       }
     }
   }
   
-  // Handle media (images/videos)
   if (entities.media) {
     for (const mediaEntity of entities.media) {
       const shortUrl = mediaEntity.url;
       const mediaUrl = mediaEntity.media_url_https || mediaEntity.media_url;
       
       if (mediaUrl) {
-        // Remove t.co link from text, we'll add the direct URL separately
         replacements.push({ from: shortUrl, to: '' });
       }
     }
   }
   
-  // Apply replacements
   for (const { from, to } of replacements) {
     expanded = expanded.replace(from, to);
   }
   
-  // Clean up extra whitespace
   expanded = expanded.replace(/\s+/g, ' ').trim();
   
   return expanded;
@@ -206,7 +198,7 @@ function getMediaUrls(entities) {
   if (entities && entities.media) {
     for (const mediaEntity of entities.media) {
       const url = mediaEntity.media_url_https || mediaEntity.media_url;
-      const type = mediaEntity.type; // 'photo' or 'video'
+      const type = mediaEntity.type;
       
       if (url) {
         mediaUrls.push({ url, type });
@@ -221,16 +213,9 @@ function getMediaUrls(entities) {
 // Full text extraction (handles long tweets)
 // ════════════════════════════════════════════════════════════════════
 
-/**
- * Returns the complete tweet text, preferring the long-form note_tweet
- * when available, otherwise falling back to the legacy truncated text.
- */
 function getFullText(legacy, result) {
-  // For long tweets, Twitter puts the full text inside note_tweet
   const noteText = result?.note_tweet?.note_tweet_results?.result?.text;
   if (noteText) return noteText;
-
-  // Fallback to legacy full_text (truncated for >280 chars)
   return legacy.full_text || '';
 }
 
@@ -260,7 +245,6 @@ async function getUserTweets(userId) {
     withV2Timeline: true,
   };
   
-  // Extended tweet features to prevent truncation
   const features = {
     rweb_lists_timeline_redesign_enabled: true,
     responsive_web_graphql_exclude_directive_enabled: true,
@@ -298,15 +282,31 @@ async function getUserTweets(userId) {
       
       if (!legacy) return null;
       
-      // Use the full text (handles long tweets)
       const fullText = getFullText(legacy, result);
-      
-      // Check for quoted tweet
+
+      // ── FIX 1: retweets ──────────────────────────────────────────
+      // The wrapper tweet's full_text is always the truncated "RT @x: …"
+      // version. Pull the full content from the original tweet instead.
+      let isRetweet = !!legacy.retweeted_status_result;
+      let finalText = fullText;
+      let finalEntities = legacy.entities;
+
+      if (isRetweet) {
+        const rtResult = legacy.retweeted_status_result?.result;
+        const rtLegacy = rtResult?.legacy || rtResult?.tweet?.legacy;
+        if (rtLegacy) {
+          finalText = getFullText(rtLegacy, rtResult);
+          finalEntities = rtLegacy.entities;
+        }
+      }
+
+      // ── FIX 2: quoted tweets ─────────────────────────────────────
+      // quoted_status_result lives on `result`, not on `legacy`.
       let quotedTweet = null;
-      if (legacy.quoted_status_result) {
-        const quotedLegacy = legacy.quoted_status_result.result?.legacy;
-        const quotedUser = legacy.quoted_status_result.result?.core?.user_results?.result?.legacy;
-        const quotedResult = legacy.quoted_status_result.result;
+      if (result?.quoted_status_result) {
+        const quotedResult = result.quoted_status_result.result;
+        const quotedLegacy = quotedResult?.legacy;
+        const quotedUser = quotedResult?.core?.user_results?.result?.legacy;
         const quotedFullText = getFullText(quotedLegacy || {}, quotedResult);
         
         if (quotedLegacy && quotedUser) {
@@ -320,15 +320,14 @@ async function getUserTweets(userId) {
       }
       
       return {
-        // Use legacy.id_str for reliable ID
         id: legacy.id_str,
-        text: fullText,
+        text: finalText,
         created_at: legacy.created_at,
         retweet_count: legacy.retweet_count || 0,
         favorite_count: legacy.favorite_count || 0,
         reply_count: legacy.reply_count || 0,
-        is_retweet: !!legacy.retweeted_status_result,
-        entities: legacy.entities,
+        is_retweet: isRetweet,
+        entities: finalEntities,
         quoted_tweet: quotedTweet,
       };
     })
@@ -352,15 +351,12 @@ async function fetchAllTweets(state) {
       let tweets = await getUserTweets(userId);
       console.log(`  Fetched ${tweets.length} recent tweet(s)`);
       
-      // ---- CLIENT-SIDE DEDUPLICATION ----
-      // The GraphQL API does NOT honor since_id, so we filter here.
       if (lastSeenId) {
         tweets = tweets.filter(tweet => tweet.id > lastSeenId);
         console.log(`  After filtering: ${tweets.length} truly new tweet(s)`);
       }
       
       if (tweets.length > 0) {
-        // Twitter returns tweets NEWEST FIRST → tweets[0] = newest
         state[username] = tweets[0].id;
         console.log(`  Updated last seen ID to: ${state[username]}`);
         
@@ -397,18 +393,13 @@ function formatTweetMessage(tweet) {
   const icon = tweet.is_retweet ? '🔁 ' : '';
   const tweetUrl = `https://twitter.com/${tweet.username}/status/${tweet.id}`;
   
-  // Expand URLs in main tweet text (now uses full text)
   let text = expandUrls(tweet.text, tweet.entities);
-  
-  // Get media URLs
   const mediaUrls = getMediaUrls(tweet.entities);
   
-  // Build message
   let message = `${icon}@${tweet.username} • ${formatted}\n`;
   message += `━━━━━━━━━━━━━━━\n`;
   message += `${text}\n`;
   
-  // Add media URLs
   if (mediaUrls.length > 0) {
     message += '\n';
     for (const media of mediaUrls) {
@@ -417,7 +408,6 @@ function formatTweetMessage(tweet) {
     }
   }
   
-  // Add quoted tweet if exists (with full text)
   if (tweet.quoted_tweet) {
     const quotedText = expandUrls(tweet.quoted_tweet.text, tweet.quoted_tweet.entities);
     message += `\n┌─ Quoted tweet ─────────\n`;
@@ -426,7 +416,6 @@ function formatTweetMessage(tweet) {
     message += `└────────────────────────\n`;
   }
   
-  // Add stats
   const stats = [];
   if (tweet.reply_count > 0) stats.push(`💬 ${formatNumber(tweet.reply_count)}`);
   if (tweet.retweet_count > 0) stats.push(`🔁 ${formatNumber(tweet.retweet_count)}`);
@@ -456,8 +445,6 @@ async function sendToTelegram(message) {
   }
   
   const apiPath = `/bot${token}/sendMessage`;
-  
-  // Split if too long (Telegram limit: 4096 chars)
   const MAX_LENGTH = 4096;
   const chunks = [];
   
@@ -469,7 +456,7 @@ async function sendToTelegram(message) {
     const body = {
       chat_id: chatId,
       text: chunk,
-      disable_web_page_preview: true, // Don't load previews to save data
+      disable_web_page_preview: true,
     };
     
     const result = await httpsPost('api.telegram.org', apiPath, body);
@@ -478,7 +465,6 @@ async function sendToTelegram(message) {
       throw new Error(`Telegram error: ${JSON.stringify(result)}`);
     }
     
-    // Small delay between messages
     if (chunks.length > 1) {
       await sleep(500);
     }
@@ -496,11 +482,9 @@ async function main() {
   console.log(`Accounts: ${CONFIG.ACCOUNTS.join(', ')}`);
   console.log('═'.repeat(60));
   
-  // Load state
   const state = loadState();
   console.log('\nCurrent state:', JSON.stringify(state, null, 2));
   
-  // Fetch new tweets
   const newTweets = await fetchAllTweets(state);
   console.log(`\nTotal new tweets: ${newTweets.length}`);
   
@@ -510,14 +494,12 @@ async function main() {
     return;
   }
   
-  // Sort chronologically (oldest first)
   newTweets.sort((a, b) => {
     const dateA = Date.parse(a.created_at);
     const dateB = Date.parse(b.created_at);
     return dateA - dateB;
   });
   
-  // Send to Telegram
   console.log('\nSending to Telegram...');
   for (const tweet of newTweets) {
     const message = formatTweetMessage(tweet);
@@ -528,13 +510,12 @@ async function main() {
     try {
       await sendToTelegram(message);
       console.log('  ✅ Sent');
-      await sleep(1000); // 1 second between tweets
+      await sleep(1000);
     } catch (error) {
       console.error(`  ❌ Failed: ${error.message}`);
     }
   }
   
-  // Save state
   saveState(state);
   console.log('\n✅ State saved');
   
