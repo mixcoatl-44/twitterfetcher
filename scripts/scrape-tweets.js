@@ -220,6 +220,39 @@ function getFullText(legacy, result) {
 }
 
 // ════════════════════════════════════════════════════════════════════
+// Quoted tweet extraction (shared helper)
+// ════════════════════════════════════════════════════════════════════
+
+/**
+ * Extracts a quoted tweet from a result object.
+ * parentResult is used as a fallback user source for self-quotes,
+ * where the API omits user info inside the quoted_status_result.
+ */
+function extractQuotedTweet(sourceResult, parentResult) {
+  if (!sourceResult?.quoted_status_result) return null;
+
+  const quotedResult = sourceResult.quoted_status_result.result;
+  const quotedLegacy = quotedResult?.legacy;
+  if (!quotedLegacy) return null;
+
+  // ── FIX 1: self-quotes ───────────────────────────────────────────
+  // The API sometimes omits user info for self-quotes. Fall back to
+  // the parent tweet's author in that case.
+  const quotedUser =
+    quotedResult?.core?.user_results?.result?.legacy ||
+    parentResult?.core?.user_results?.result?.legacy;
+
+  if (!quotedUser) return null;
+
+  return {
+    text: getFullText(quotedLegacy, quotedResult),
+    author: quotedUser.screen_name,
+    author_name: quotedUser.name,
+    entities: quotedLegacy.entities,
+  };
+}
+
+// ════════════════════════════════════════════════════════════════════
 // Twitter API
 // ════════════════════════════════════════════════════════════════════
 
@@ -284,15 +317,14 @@ async function getUserTweets(userId) {
       
       const fullText = getFullText(legacy, result);
 
-      // ── FIX 1: retweets ──────────────────────────────────────────
-      // The wrapper tweet's full_text is always the truncated "RT @x: …"
-      // version. Pull the full content from the original tweet instead.
+      // ── Retweets: pull full text from the original tweet ─────────
       let isRetweet = !!legacy.retweeted_status_result;
       let finalText = fullText;
       let finalEntities = legacy.entities;
+      let rtResult = null;
 
       if (isRetweet) {
-        const rtResult = legacy.retweeted_status_result?.result;
+        rtResult = legacy.retweeted_status_result?.result;
         const rtLegacy = rtResult?.legacy || rtResult?.tweet?.legacy;
         if (rtLegacy) {
           finalText = getFullText(rtLegacy, rtResult);
@@ -300,24 +332,13 @@ async function getUserTweets(userId) {
         }
       }
 
-      // ── FIX 2: quoted tweets ─────────────────────────────────────
-      // quoted_status_result lives on `result`, not on `legacy`.
-      let quotedTweet = null;
-      if (result?.quoted_status_result) {
-        const quotedResult = result.quoted_status_result.result;
-        const quotedLegacy = quotedResult?.legacy;
-        const quotedUser = quotedResult?.core?.user_results?.result?.legacy;
-        const quotedFullText = getFullText(quotedLegacy || {}, quotedResult);
-        
-        if (quotedLegacy && quotedUser) {
-          quotedTweet = {
-            text: quotedFullText,
-            author: quotedUser.screen_name,
-            author_name: quotedUser.name,
-            entities: quotedLegacy.entities,
-          };
-        }
-      }
+      // ── FIX 2: quoted tweet — check the right level ──────────────
+      // For a plain quote tweet:     quoted_status_result is on result
+      // For a retweet of a quote:    quoted_status_result is on rtResult
+      // extractQuotedTweet() also handles self-quotes (Fix 1).
+      const quotedTweet = isRetweet
+        ? extractQuotedTweet(rtResult, rtResult)
+        : extractQuotedTweet(result, result);
       
       return {
         id: legacy.id_str,
