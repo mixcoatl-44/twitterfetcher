@@ -17,7 +17,7 @@ const CONFIG = {
     'TruthTrumpPosts',
     'spectatorindex',
     'RafaelH117',
-    'BarakRavid',
+    'tparsi',
     'TheStudyofWar',
     'sentdefender',
     'rich_goldberg',
